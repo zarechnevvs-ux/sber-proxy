@@ -1,4 +1,5 @@
 import express from 'express';
+import https from 'https';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -21,29 +22,65 @@ app.post('/download', async (req, res) => {
       return res.status(400).send('Invalid URL');
     }
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'text/plain,application/octet-stream,application/zip,*/*',
-        'Referer': 'https://sbi.sberbank.ru/'
-      }
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).send(text.slice(0, 1000));
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = await downloadSberFile_(url);
 
     res.setHeader('Content-Type', 'application/octet-stream');
     res.send(buffer);
 
   } catch (e) {
-    res.status(500).send(e.message);
+    console.error('Proxy error:', e);
+    res.status(500).send(e.message || 'Proxy error');
   }
 });
+
+function downloadSberFile_(url) {
+  return new Promise((resolve, reject) => {
+    const agent = new https.Agent({
+      rejectUnauthorized: false
+    });
+
+    const req = https.get(url, {
+      agent,
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'text/plain,application/octet-stream,application/zip,*/*',
+        'Referer': 'https://sbi.sberbank.ru/'
+      }
+    }, response => {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        let errorText = '';
+
+        response.on('data', chunk => {
+          errorText += chunk.toString();
+        });
+
+        response.on('end', () => {
+          reject(new Error(`Sber HTTP ${response.statusCode}: ${errorText.slice(0, 1000)}`));
+        });
+
+        return;
+      }
+
+      const chunks = [];
+
+      response.on('data', chunk => {
+        chunks.push(chunk);
+      });
+
+      response.on('end', () => {
+        resolve(Buffer.concat(chunks));
+      });
+    });
+
+    req.on('error', error => {
+      reject(error);
+    });
+
+    req.setTimeout(60000, () => {
+      req.destroy(new Error('Sber download timeout'));
+    });
+  });
+}
 
 const port = process.env.PORT || 3000;
 
